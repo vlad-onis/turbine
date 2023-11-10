@@ -28,6 +28,9 @@ enum ParseError {
 
     #[error("Invalid request")]
     InvalidRequest,
+
+    #[error("IO error: {0}")]
+    IO(#[from] std::io::Error),
 }
 
 // Static lifetime is infered here
@@ -36,8 +39,35 @@ const HEADER_STATUS: &str = "HTTP/1.1 200 OK\r\n";
 const HEADER_CONTENT_TYPE: &str = "Content-Type: text/html; charset=UTF-8\r\n";
 const NEW_LINE: &str = "\r\n";
 
-fn parse_request(request: &str) -> Result<String, ParseError> {
-    let lines: Vec<_> = request.split("\r\n").collect();
+fn read_stream_content_to_end(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    let mut buffer = [0; 1024]; // Adjust buffer size as needed
+    let mut request = Vec::new();
+
+    loop {
+        let bytes_read = stream.read(&mut buffer)?;
+
+        if bytes_read == 0 {
+            break; // Connection was closed
+        }
+
+        request.extend_from_slice(&buffer[..bytes_read]);
+
+        // Check if the end of the request is reached
+        if request.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    Ok(request)
+}
+
+fn parse_request(stream: &mut TcpStream) -> Result<String, ParseError> {
+    let request = read_stream_content_to_end(stream)?;
+
+    let request_str = String::from_utf8_lossy(&request);
+    println!("Received request: {}", request_str);
+
+    let lines: Vec<_> = request_str.split("\r\n").collect();
 
     let first_line = lines.first().ok_or(ParseError::EmptyRequest)?;
 
@@ -53,20 +83,7 @@ fn parse_request(request: &str) -> Result<String, ParseError> {
 }
 
 fn serve_file(mut stream: TcpStream) -> Result<(), ServerError> {
-    stream.set_read_timeout(Some(Duration::from_micros(1000)))?;
-
-    let mut buf: Vec<u8> = Vec::new();
-    let mut buf = String::new();
-    // this throws an error, when the timeout is reached.
-    // because the connection is not close so the end is not reached.
-    let _ = stream.read_to_string(&mut buf)?;
-
-    // let request = String::from_utf8(buf)?;
-    let request = buf;
-
-    // todo: Remove printlns
-    println!("Request: {}", request);
-    let resource = parse_request(&request)?;
+    let resource = parse_request(&mut stream)?;
     println!("Parsed Resource : {}", resource);
 
     let file_content = fs::read_to_string("index.html")?;
