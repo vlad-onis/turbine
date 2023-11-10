@@ -2,3 +2,7 @@
 name = "turbine"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+http = "0.2.10"
+thiserror = "1.0.50"
