@@ -1,3 +1,7 @@
+mod http;
+
+use http::{ParseError, Request as HttpRequest};
+
 use std::fs;
 use std::io::Result as IOResult;
 #[allow(unused_imports)]
@@ -5,9 +9,9 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::net::TcpStream;
 use std::string::FromUtf8Error;
-use std::time::Duration;
 
 use thiserror::Error;
+
 
 #[derive(Error, Debug)]
 enum ServerError {
@@ -18,19 +22,7 @@ enum ServerError {
     Conversion(#[from] FromUtf8Error),
 
     #[error("Parsing the request failed because: {0}")]
-    RequestParsing(#[from] ParseError),
-}
-
-#[derive(Error, Debug)]
-enum ParseError {
-    #[error("Http request cannot be empty")]
-    EmptyRequest,
-
-    #[error("Invalid request")]
-    InvalidRequest,
-
-    #[error("IO error: {0}")]
-    IO(#[from] std::io::Error),
+    RequestParsing(#[from] http::ParseError),
 }
 
 // Static lifetime is infered here
@@ -39,7 +31,7 @@ const HEADER_STATUS: &str = "HTTP/1.1 200 OK\r\n";
 const HEADER_CONTENT_TYPE: &str = "Content-Type: text/html; charset=UTF-8\r\n";
 const NEW_LINE: &str = "\r\n";
 
-fn read_stream_content_to_end(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+fn read_stream_content_to_end(stream: &mut TcpStream) -> Result<http::Request, http::ParseError> {
     let mut buffer = [0; 1024]; // Adjust buffer size as needed
     let mut request = Vec::new();
 
@@ -58,33 +50,23 @@ fn read_stream_content_to_end(stream: &mut TcpStream) -> std::io::Result<Vec<u8>
         }
     }
 
+    let request = String::from_utf8_lossy(&request).to_string();
+    let request = HttpRequest::new(request)?;
+
     Ok(request)
 }
 
 fn parse_request(stream: &mut TcpStream) -> Result<String, ParseError> {
     let request = read_stream_content_to_end(stream)?;
 
-    let request_str = String::from_utf8_lossy(&request);
-    println!("Received request: {}", request_str);
+    let resource = request.headers.resource;
 
-    let lines: Vec<_> = request_str.split("\r\n").collect();
-
-    let first_line = lines.first().ok_or(ParseError::EmptyRequest)?;
-
-    let words = first_line.split_whitespace().collect::<Vec<_>>();
-
-    if words.len() != 3 {
-        return Err(ParseError::InvalidRequest);
-    }
-
-    let resource = words[1].clone();
-
-    Ok(resource.to_string())
+    Ok(resource)
 }
 
 fn serve_file(mut stream: TcpStream) -> Result<(), ServerError> {
     let resource = parse_request(&mut stream)?;
-    println!("Parsed Resource : {}", resource);
+    println!("Parsed Resource : {:?}", resource);
 
     let file_content = fs::read_to_string("index.html")?;
     let content_length = file_content.len() + END_OF_CONTENT.len();
@@ -127,4 +109,26 @@ fn main() -> IOResult<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    pub fn test_parse_headers_fail() {
+        assert!(Headers::new(vec![]).is_err());
+        assert!(Headers::new(vec!["GET", "/"]).is_err());
+        assert!(Headers::new(vec!["GWET", "/", "HTTP/1.1"]).is_err());
+    }
+
+    #[test]
+    pub fn test_parse_headers() {
+        let header = Headers::new(vec!["GET", "/", "HTTP/1.1"]);
+        println!("{header:?}");
+
+        assert!(Headers::new(vec!["GET", "/", "HTTP/1.1"]).is_ok());
+        assert!(Headers::new(vec!["POST", "/", "HTTP/1.1"]).is_ok());
+        assert!(Headers::new(vec!["GET", "/foo", "HTTP/1.1"]).is_ok());
+    }
 }
