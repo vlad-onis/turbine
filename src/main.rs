@@ -98,7 +98,8 @@ fn _greet(mut stream: TcpStream) {
 }
 
 fn main() -> IOResult<()> {
-    let listener = TcpListener::bind("127.0.0.1:3000")?;
+    println!("Starting turbine");
+    let listener = TcpListener::bind("0.0.0.0:12345")?;
 
     for stream in listener.incoming() {
         println!("#### New connection received");
