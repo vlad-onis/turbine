@@ -8,10 +8,12 @@ use std::io::Result as IOResult;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::net::TcpStream;
+use std::ops::Deref;
+use std::path::Path;
+use std::path::PathBuf;
 use std::string::FromUtf8Error;
 
 use thiserror::Error;
-
 
 #[derive(Error, Debug)]
 enum ServerError {
@@ -31,6 +33,9 @@ const HEADER_STATUS: &str = "HTTP/1.1 200 OK\r\n";
 const HEADER_CONTENT_TYPE: &str = "Content-Type: text/html; charset=UTF-8\r\n";
 const NEW_LINE: &str = "\r\n";
 
+/// Reads the content of the stream until the end of the request is reached
+/// Acts as a converter from [TcpStream] to [http::Request] to ensure a validated request
+/// and separation of concerns going forward
 fn read_stream_content_to_end(stream: &mut TcpStream) -> Result<http::Request, http::ParseError> {
     let mut buffer = [0; 1024]; // Adjust buffer size as needed
     let mut request = Vec::new();
@@ -56,20 +61,108 @@ fn read_stream_content_to_end(stream: &mut TcpStream) -> Result<http::Request, h
     Ok(request)
 }
 
-fn parse_request(stream: &mut TcpStream) -> Result<String, ParseError> {
-    let request = read_stream_content_to_end(stream)?;
+/// Specifies a valid HTTP path after parsing
+#[derive(Debug)]
+struct HttpPath(PathBuf);
 
-    let resource = request.headers.resource;
+impl Deref for HttpPath {
+    type Target = PathBuf;
 
-    Ok(resource)
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
+impl AsRef<Path> for HttpPath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
+/// Usage:
+/// ```rust
+/// let path = HttpPath::try_from("/web_resources/index.html".to_string());
+/// ```
+impl TryFrom<String> for HttpPath {
+    type Error = ParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        
+        // Paths should start with a slash to represent the root of the resource hierarchy
+        // Also the slash refers to the root directory, if it was not there the server might
+        // try to resolve the path as the root directory leading to potential flawed results
+        if !value.starts_with("/") {
+            return Err(ParseError::PathShouldStartWithSlash(value));
+        }
+
+        // remove spaces up to the first slash
+        let value = value.trim_start_matches("/").to_string();
+
+        
+        let path = if value.as_str() == "/" {
+            PathBuf::from("web_resources")
+        } else {
+            PathBuf::from("web_resources").join(&value)
+        };
+
+        // From here on, this needs to be an absolute path
+        // If path was -> "/../index.html" this would end up in the parent directory of 
+        // the document root. This function returns the absolute path to this parent
+        // directory
+        let path = fs::canonicalize(path)?;
+
+        // This path needs to be a file or a directory inside the web_resources directory
+        // inside the current working directory
+        let expected_prefix = std::env::current_dir()?.join("web_resources");
+        if !path.starts_with(&expected_prefix) {
+            println!("Path does not start with web_resources");
+            return Err(ParseError::PathOutsideDocumentRoot(value));
+        }
+
+        if path.is_file() {
+            return Ok(HttpPath(path));
+        }
+
+        // assume index.html as the default file to look for when the path is a directory
+        if path.is_dir() {
+            return Ok(HttpPath(path.join("index.html")));
+        }
+
+        
+        Err(ParseError::InvalidPath(value))
+    }
+}
+
+/// Parses the request and returns the resource path
+/// Resource path is the path to the file that should be served
+/// The path is validated to ensure that it is a file inside the web_resources directory
+/// It defaults to index.html if the path is a directory
+fn parse_request(request: &http::Request) -> Result<HttpPath, ParseError> {
+    println!("Request: {:?}", request);
+    let resource = request.headers.resource.clone();
+    println!("Resource: {:?}", resource);
+
+    let http_path = HttpPath::try_from(resource)?;
+    println!("HttpPath: {:?}", http_path);
+
+    Ok(http_path)
+}
+
+/// Reads the content of the file specified by the resource path
+fn get_resource_content(resource: &HttpPath) -> std::io::Result<String> {
+    let file_content = fs::read_to_string(resource)?;
+    Ok(file_content)
+}
+
+/// Serves the file specified by the resource path back to the client
 fn serve_file(mut stream: TcpStream) -> Result<(), ServerError> {
-    let resource = parse_request(&mut stream)?;
+    let request = read_stream_content_to_end(&mut stream)?;
+
+    let resource = parse_request(&request)?;
     println!("Parsed Resource : {:?}", resource);
 
-    let file_content = fs::read_to_string("index.html")?;
-    let content_length = file_content.len() + END_OF_CONTENT.len();
+    let resource_content = get_resource_content(&resource)?;
+    let content_length = resource_content.len() + END_OF_CONTENT.len();
 
     stream.write_all(HEADER_STATUS.as_bytes())?;
     stream.write_all(HEADER_CONTENT_TYPE.as_bytes())?;
@@ -79,22 +172,10 @@ fn serve_file(mut stream: TcpStream) -> Result<(), ServerError> {
 
     stream.write_all(NEW_LINE.as_bytes())?;
 
-    stream.write_all(file_content.as_bytes())?;
+    stream.write_all(resource_content.as_bytes())?;
     stream.write_all(END_OF_CONTENT.as_bytes())?;
 
     Ok(())
-}
-
-fn _greet(mut stream: TcpStream) {
-    // // Set up reading
-    // let _ = stream.set_read_timeout(Some(Duration::from_micros(10)));
-    // let mut buf: Vec<u8> = Vec::new();
-    // let _ = stream.read_to_end(&mut buf);
-
-    let _ = stream.shutdown(std::net::Shutdown::Read);
-
-    let response = "HTTP/1.1 200 OK\r\nConnection: Closed\r\n\r\n";
-    let _ = stream.write_all(response.as_bytes());
 }
 
 fn main() -> IOResult<()> {
@@ -115,6 +196,7 @@ fn main() -> IOResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::*;
 
     #[test]
     pub fn test_parse_headers_fail() {
@@ -131,5 +213,58 @@ mod tests {
         assert!(Headers::new(vec!["GET", "/", "HTTP/1.1"]).is_ok());
         assert!(Headers::new(vec!["POST", "/", "HTTP/1.1"]).is_ok());
         assert!(Headers::new(vec!["GET", "/foo", "HTTP/1.1"]).is_ok());
+    }
+
+    #[test]
+    pub fn try_from_for_http_path() {
+        let document_root = std::env::current_dir().unwrap().join("web_resources");
+
+        let path = HttpPath::try_from("/index.html".to_string());
+        assert!(path.is_ok());
+        assert_eq!(
+            path.unwrap().as_path(),
+            Path::new(document_root.join("index.html").to_str().unwrap())
+        );
+
+        let path = HttpPath::try_from("/".to_string());
+        assert!(path.is_ok());
+        assert_eq!(
+            path.unwrap().as_path(),
+            Path::new(document_root.join("index.html").to_str().unwrap())
+        );
+
+        let path = HttpPath::try_from("/foo".to_string());
+        assert!(path.is_ok());
+        assert_eq!(
+            path.unwrap().as_path(),
+            Path::new(document_root.join("foo/index.html").to_str().unwrap())
+        );
+
+        let path = HttpPath::try_from("/foo/".to_string());
+        assert!(path.is_ok());
+        assert_eq!(
+            path.unwrap().as_path(),
+            Path::new(document_root.join("foo/index.html").to_str().unwrap())
+        );
+
+        let path = HttpPath::try_from("/foo/bar".to_string());
+        println!("{:?}", path);
+        assert!(path.is_ok());
+        assert_eq!(
+            path.unwrap().as_path(),
+            Path::new(document_root.join("foo/bar/index.html").to_str().unwrap())
+        );
+
+        let path = HttpPath::try_from("".to_string());
+        assert!(path.is_err());
+
+        let path = HttpPath::try_from("../index.html".to_string());
+        assert!(path.is_err());
+
+        let path = HttpPath::try_from("/../index.html".to_string());
+        assert!(path.is_err());
+
+        let path = HttpPath::try_from("foo".to_string());
+        assert!(path.is_err());
     }
 }
