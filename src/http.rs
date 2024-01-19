@@ -1,6 +1,11 @@
 use std::collections::HashMap;
 #[allow(unused_imports)]
 use std::io::{Read, Write};
+use std::ops::Deref;
+use std::path::Path;
+use std::path::PathBuf;
+
+use std::fs;
 
 use thiserror::Error;
 
@@ -19,14 +24,8 @@ pub enum ParseError {
     #[error("Unknown or unsupported http method : {0}")]
     InvalidMethod(String),
 
-    #[error("Resource {0} could not be found because it points outside the document root")]
-    PathOutsideDocumentRoot(String),
-
-    #[error("Path {0} should start with a slash")]
-    PathShouldStartWithSlash(String),
-
     #[error("Path {0} is invalid")]
-    InvalidPath(String)
+    InvalidPath(PathBuf),
 }
 
 /// Supported HTTP methods
@@ -48,10 +47,8 @@ pub struct Headers {
 }
 
 impl Headers {
-
     /// Creates a new [Headers] instance from a vector of strings
     pub fn new(headers: Vec<&str>) -> Result<Headers, ParseError> {
-
         // At least the method, resource and version should be present
         if headers.len() != 3 {
             return Err(ParseError::InvalidHeaders);
@@ -65,7 +62,7 @@ impl Headers {
 
         let resource = headers[1].to_string();
         let version = headers[2].to_string();
-        
+
         // TODO: Parse other headers
         let other_headers = HashMap::new();
 
@@ -99,5 +96,46 @@ impl Request {
         let body = Vec::new();
 
         Ok(Request { headers, body })
+    }
+}
+
+/// Specifies a valid HTTP path after parsing
+#[derive(Debug)]
+pub struct HttpPath(PathBuf);
+
+impl Deref for HttpPath {
+    type Target = PathBuf;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for HttpPath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
+/// Usage:
+/// ```rust
+/// let path = HttpPath::try_from("/web_resources/index.html".to_string());
+/// ```
+impl TryFrom<PathBuf> for HttpPath {
+    type Error = ParseError;
+
+    fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
+        let canonicalized_path = fs::canonicalize(path)?;
+
+        if canonicalized_path.is_file() {
+            return Ok(HttpPath(canonicalized_path));
+        }
+
+        // assume index.html as the default file to look for when the path is a directory
+        if canonicalized_path.is_dir() {
+            return Ok(HttpPath(canonicalized_path.join("index.html")));
+        }
+
+        Err(ParseError::InvalidPath(canonicalized_path))
     }
 }
