@@ -34,10 +34,7 @@ impl Config {
 
         let content = std::fs::read_to_string(config_file)?;
 
-        let config = match toml::from_str(&content) {
-            Ok(config) => config,
-            Err(_e) => Config::default(),
-        };
+        let config = toml::from_str(&content).unwrap_or_default();
 
         Ok(config)
     }
