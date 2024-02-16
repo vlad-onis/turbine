@@ -125,6 +125,9 @@ impl TryFrom<PathBuf> for HttpPath {
     type Error = ParseError;
 
     fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
+        
+        // todo: we don't need to do this again right, since it happens
+        // right before we create the resolver.
         let canonicalized_path = fs::canonicalize(path)?;
 
         if canonicalized_path.is_file() {
