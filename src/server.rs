@@ -52,16 +52,24 @@ impl Server {
         let document_root = config.document_root;
         let canonicalized_document_root = fs::canonicalize(document_root)?;
 
+        let mut handles = vec![];
+
         for stream in listener.incoming() {
             println!("#### New connection received");
             if let Ok(s) = stream {
                 // :)
                 let document_root = canonicalized_document_root.clone();
                 let handle = std::thread::spawn(move || Server::serve_file(s, document_root));
-                let res = handle.join();
+                handles.push(handle);
+                if handles.len() == 4 {
+                    // stop the world and wait for all the request
+                    for handle in handles {
+                        let res = handle.join();
+                        println!("{:?}", res);
+                    }
 
-                // let res = self.serve_file(s);
-                println!("{:?}", res);
+                    handles = vec![];
+                }
             }
         }
 
