@@ -13,10 +13,9 @@ fn main() -> AnyhowResult<()> {
     let args = Args::parse();
     println!("{:?}", args);
     let config = Config::new(args.config_file)?;
-
-    let server = Server::new(config)?;
-
-    server.run()?;
+    {
+        Server::run(config)?;
+    }
 
     Ok(())
 }
