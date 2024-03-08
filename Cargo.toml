@@ -8,4 +8,5 @@ anyhow = "1.0.75"
 clap = { version = "4.4.10", features = ["derive"] }
 serde = { version = "1.0.193", features = ["derive"] }
 thiserror = "1.0.50"
+threadpool = "1.8.1"
 toml = "0.8.8"
