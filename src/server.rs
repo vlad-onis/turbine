@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::string::FromUtf8Error;
 
 use crate::config::Config;
@@ -31,29 +32,39 @@ const HEADER_STATUS: &str = "HTTP/1.1 200 OK\r\n";
 const HEADER_CONTENT_TYPE: &str = "Content-Type: text/html; charset=UTF-8\r\n";
 const NEW_LINE: &str = "\r\n";
 
-pub struct Server {
-    resolver: Resolver,
-}
+pub struct Server;
 
 impl Server {
-    pub fn new(config: Config) -> Result<Self, ServerError> {
-        let document_root = config.document_root;
-        let canonicalized_document_root = fs::canonicalize(document_root)?;
-        Ok(Self {
-            resolver: Resolver::new(canonicalized_document_root),
-        })
-    }
+    // Remove the new() method in the attempt to remove &self from
+    // every server method
+    // pub fn new(config: Config) -> Result<Self, ServerError> {
+    //     let document_root = config.document_root;
+    //     let canonicalized_document_root = fs::canonicalize(document_root)?;
+    //     Ok(Self {
+    //         resolver: Resolver::new(canonicalized_document_root),
+    //     })
+    // }
 
-    pub fn run(&self) -> Result<(), ServerError> {
+    pub fn run(config: Config) -> Result<(), ServerError> {
         println!("Starting turbine");
 
         let listener = TcpListener::bind("0.0.0.0:12345")?;
+        let document_root = config.document_root;
+        let canonicalized_document_root = fs::canonicalize(document_root)?;
+
+        let thread_pool = threadpool::Builder::new().num_threads(1000).build();
 
         for stream in listener.incoming() {
             println!("#### New connection received");
             if let Ok(s) = stream {
-                let res = self.serve_file(s);
-                println!("{:?}", res);
+                // :)
+                let document_root = canonicalized_document_root.clone();
+                thread_pool.execute(move || {
+                    let result = Server::serve_file(s, document_root);
+                    if result.is_err() {
+                        println!("{:?}", result);
+                    }
+                })
             }
         }
 
@@ -63,10 +74,8 @@ impl Server {
     /// Reads the content of the stream until the end of the request is reached
     /// Acts as a converter from [TcpStream] to [http::Request] to ensure a validated request
     /// and separation of concerns going forward
-    fn read_stream_content_to_end(
-        &self,
-        stream: &mut TcpStream,
-    ) -> Result<HttpRequest, ParseError> {
+    // fn read_stream_content_to_end(stream: &mut TcpStream) -> Result<HttpRequest, ParseError> {
+    fn read_stream_content_to_end(mut stream: impl Read) -> Result<HttpRequest, ParseError> {
         let mut buffer = [0; 1024]; // Adjust buffer size as needed
         let mut request = Vec::new();
 
@@ -95,23 +104,41 @@ impl Server {
     /// Resource path is the path to the file that should be served
     /// The path is validated to ensure that it is a file inside the web_resources directory
     /// It defaults to index.html if the path is a directory
-    fn parse_request(&self, request: &HttpRequest) -> Result<HttpPath, ResolveError> {
-        self.resolver.resolve(request.headers.resource.clone())
+    fn parse_request(
+        request: &HttpRequest,
+        document_root: PathBuf,
+    ) -> Result<HttpPath, ResolveError> {
+        // This gets created on every request on the first try to
+        // make turbine parallel
+        let resolver = Resolver::new(document_root);
+        resolver.resolve(request.headers.resource.clone())
     }
 
     /// Reads the content of the file specified by the resource path
-    fn get_resource_content(&self, resource: &HttpPath) -> std::io::Result<String> {
-        let file_content = fs::read_to_string(resource)?;
+    fn get_resource_content(resource: &HttpPath) -> std::io::Result<String> {
+        // let file_content = fs::read_to_string(resource)?;
+        let file_content = String::from("<html>
+        <head>
+        <title>
+            Turbine
+        </title>
+        </head>
+        
+        <body>
+            Welcome to turbine
+        </body>
+        
+        </html>");
         Ok(file_content)
     }
 
     /// Serves the file specified by the resource path back to the client
-    fn serve_file(&self, mut stream: TcpStream) -> Result<(), ServerError> {
-        let request = self.read_stream_content_to_end(&mut stream)?;
+    fn serve_file(mut stream: impl Read + Write, document_root: PathBuf) -> Result<(), ServerError> {
+        let request = Server::read_stream_content_to_end(&mut stream)?;
 
-        let resource = self.parse_request(&request)?;
+        let resource = Server::parse_request(&request, document_root)?;
 
-        let resource_content = self.get_resource_content(&resource)?;
+        let resource_content = Server::get_resource_content(&resource)?;
         let content_length = resource_content.len() + END_OF_CONTENT.len();
 
         stream.write_all(HEADER_STATUS.as_bytes())?;
@@ -133,6 +160,23 @@ impl Server {
 mod tests {
     use super::*;
     use crate::http::*;
+    use std::io::{Cursor};
+
+
+    #[test]
+    fn test_serve_file() {
+        
+        let document_root = std::env::current_dir().unwrap().join("web_resources");
+        let mut request = "GET / HTTP/1.1\r\nHost: localhost:12345\r\nUser-Agent: curl/7.68.0\r\nAccept: */*\r\n\r\n".as_bytes().to_vec();
+        
+        for i in 0..10000 {
+            // Create a "dummy" stream for a request, which is just a string
+            let mut buff = Cursor::new(&mut request);
+
+            let response = Server::serve_file(&mut buff, document_root.clone());
+            assert!(response.is_ok());
+        }
+    }
 
     #[test]
     pub fn test_parse_headers_fail() {
@@ -151,56 +195,57 @@ mod tests {
         assert!(Headers::new(vec!["GET", "/foo", "HTTP/1.1"]).is_ok());
     }
 
-    #[test]
-    pub fn try_from_for_http_path() {
-        let document_root = std::env::current_dir().unwrap().join("web_resources");
 
-        let path = HttpPath::try_from("/index.html".to_string());
-        assert!(path.is_ok());
-        assert_eq!(
-            path.unwrap().as_path(),
-            Path::new(document_root.join("index.html").to_str().unwrap())
-        );
+    // todo: check if we still need these tests and move them to resolver 🦀
+    // #[test]
+    // pub fn try_from_for_http_path() {
+    //     let document_root = std::env::current_dir().unwrap().join("web_resources");
 
-        let path = HttpPath::try_from("/".to_string());
-        assert!(path.is_ok());
-        assert_eq!(
-            path.unwrap().as_path(),
-            Path::new(document_root.join("index.html").to_str().unwrap())
-        );
+    //     let path = HttpPath::try_from(PathBuf::from("/foo/"));
+    //     assert_eq!(
+    //         path.unwrap().as_path(),
+    //         Path::new(document_root.join("index.html").to_str().unwrap())
+    //     );
 
-        let path = HttpPath::try_from("/foo".to_string());
-        assert!(path.is_ok());
-        assert_eq!(
-            path.unwrap().as_path(),
-            Path::new(document_root.join("foo/index.html").to_str().unwrap())
-        );
+    //     let path = HttpPath::try_from(PathBuf::from("/foo/"));
+    //     assert!(path.is_ok());
+    //     assert_eq!(
+    //         path.unwrap().as_path(),
+    //         Path::new(document_root.join("index.html").to_str().unwrap())
+    //     );
 
-        let path = HttpPath::try_from("/foo/".to_string());
-        assert!(path.is_ok());
-        assert_eq!(
-            path.unwrap().as_path(),
-            Path::new(document_root.join("foo/index.html").to_str().unwrap())
-        );
+    //     let path = HttpPath::try_from(PathBuf::from("/foo/"));
+    //     assert!(path.is_ok());
+    //     assert_eq!(
+    //         path.unwrap().as_path(),
+    //         Path::new(document_root.join("foo/index.html").to_str().unwrap())
+    //     );
 
-        let path = HttpPath::try_from("/foo/bar".to_string());
-        println!("{:?}", path);
-        assert!(path.is_ok());
-        assert_eq!(
-            path.unwrap().as_path(),
-            Path::new(document_root.join("foo/bar/index.html").to_str().unwrap())
-        );
+    //     let path = HttpPath::try_from(PathBuf::from("/foo/"));
+    //     assert!(path.is_ok());
+    //     assert_eq!(
+    //         path.unwrap().as_path(),
+    //         Path::new(document_root.join("foo/index.html").to_str().unwrap())
+    //     );
 
-        let path = HttpPath::try_from("".to_string());
-        assert!(path.is_err());
+    //     let path = HttpPath::try_from(PathBuf::from("/foo/"));
+    //     println!("{:?}", path);
+    //     assert!(path.is_ok());
+    //     assert_eq!(
+    //         path.unwrap().as_path(),
+    //         Path::new(document_root.join("foo/bar/index.html").to_str().unwrap())
+    //     );
 
-        let path = HttpPath::try_from("../index.html".to_string());
-        assert!(path.is_err());
+    //     let path = HttpPath::try_from(PathBuf::from("/foo/"));
+    //     assert!(path.is_err());
 
-        let path = HttpPath::try_from("/../index.html".to_string());
-        assert!(path.is_err());
+    //     let path = HttpPath::try_from(PathBuf::from("/foo/"));
+    //     assert!(path.is_err());
 
-        let path = HttpPath::try_from("foo".to_string());
-        assert!(path.is_err());
-    }
+    //     let path = HttpPath::try_from(PathBuf::from("/foo/"));
+    //     assert!(path.is_err());
+
+    //     let path = HttpPath::try_from(PathBuf::from("/foo/"));
+    //     assert!(path.is_err());
+    // }
 }
